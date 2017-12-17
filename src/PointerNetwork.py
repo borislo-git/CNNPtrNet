@@ -41,9 +41,12 @@ class PointerNetwork(object):
 	def CNNAttention(self, W, b, encOutputs, query, queryInputs, alreadySelected=None, alreadySelectedPenalty=1e6):
 		'''
 		Attention mechanism following "Convolutional Sequence to Sequence Learning" Gehring (2017)
+
 		'''
 		qshape = query.shape
-		d                  = tf.einsum('kl,itl->itk', W, query) + queryInputs[:,:qshape[1],:] + b
+
+		# queryInputs has previous context concatenated and also time dimension is dynamic during inference
+		d                  = tf.einsum('kl,itl->itk', W, query) + queryInputs[:,:qshape[1],:qshape[2]] + b
 		unscaledAttnLogits = tf.einsum('bjl,bic->bij', encOutputs, d) - alreadySelectedPenalty * alreadySelected[:, :qshape[1], :]
 		attnLogits         = tf.nn.softmax(unscaledAttnLogits)
 		context            = tf.einsum('bij,bjc->bic', attnLogits, encOutputs)
@@ -92,10 +95,10 @@ class PointerNetwork(object):
 			inputs   = tf.pad(inputs, paddings, mode='CONSTANT', constant_values=0)
 
 		# apply dropout to input layer only
-		# if name == 0:
-		# 	inputs = tf.layers.dropout(inputs   = inputs,
-		# 							   rate     = self.dropoutRate,
-		# 							   training = self.train)
+		if name == 0:
+			inputs = tf.layers.dropout(inputs   = inputs,
+									   rate     = self.dropoutRate,
+									   training = self.train)
 
 		if layertype == 'gau':
 		    gate = tf.layers.conv1d(inputs        = inputs,
@@ -141,6 +144,7 @@ class PointerNetwork(object):
 
 		with tf.variable_scope('Encoder'):
 			numFilters   = self.hiddenSize/self.encNumDilationLayer
+
 			self.encConv = [self.embeddedInputs]
 
 			# make the other layers
@@ -154,7 +158,7 @@ class PointerNetwork(object):
 									residual   = useRes, 
 									name       = layerNum))
 
-			self.encOutputs = tf.concat(self.encConv, axis=2)
+			self.encOutputs = tf.concat(self.encConv[1:], axis=2)
 
 	def makeDecoder(self):
 		'''
@@ -193,6 +197,7 @@ class PointerNetwork(object):
 														           queryInputs     = self.embeddedTargets, 
 														           alreadySelected = alreadySelected)	
 
+
 				# concatenate context vector 
 				self.decConv[-1] = tf.concat([self.decConv[-1], context], axis=2)
 
@@ -210,9 +215,9 @@ class PointerNetwork(object):
 			for time in range(self.maxTimeSteps):
 
 				# stacked CNN
-				query = self.inferenceInput
+				queryInp = self.inferenceInput
 				for layerNum in range(0, self.decNumDilationLayer):
-					query = self.CNNLayer(query, 
+					query = self.CNNLayer(queryInp, 
 										  filters    = numFilters, 
 										  kernelSize = self.decKernelSize,
 										  dilation   = factors[layerNum], 
@@ -224,10 +229,10 @@ class PointerNetwork(object):
 															   b               = self.b_attn[layerNum, :], 
 														       encOutputs      = self.encOutputs, 
 														       query           = query, 
-														       queryInputs     = self.embeddedTargets, 
+														       queryInputs     = queryInp, 
 														       alreadySelected = alreadySelected)	
 
-					query = tf.concat([query, context], axis=2)
+					queryInp = tf.concat([query, context], axis=2)
 
 				# the next output is just from the newest time from last layer
 				self.decoderOutputs.append(tf.argmax(attnLogits[:,-1,:], axis=1))
