@@ -7,6 +7,5 @@ The purpose is to make the network more suitable for set inputs/outputs
 Stack the encoder with dilated CNNs with residual. For the encoder, concatenate the outputs of each convolution layer; this will hopefully include the translational invariant information at the topmost layer and also some positional information so the decoder can knows where to point.
 
 ## To-Do
-1. Stack Decoder CNN
-2. Knapsack Problem
-3. Incorporate RL
+* Knapsack Problem
+* Incorporate RL
