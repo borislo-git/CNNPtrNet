@@ -5,14 +5,16 @@ class PointerNetwork(object):
 
 	def __init__(self, configFile):
 
-		self.loss = 0
-
+		self.loss       = 0
+		self.globalStep = tf.Variable(0, trainable=False)
 		self.readConfig(configFile)
-		self.makePlaceholders()
-		self.makeEmbeddings()
-		self.makeEncoder()
-		self.makeDecoder()
-		self.makeOptimizer()
+
+		with tf.variable_scope('Pointer_Network'):
+			self.makePlaceholders()
+			self.makeEmbeddings()
+			self.makeEncoder()
+			self.makeDecoder()
+			self.makeOptimizer()
 
 	def readConfig(self, configFile):
 		'''
@@ -47,7 +49,12 @@ class PointerNetwork(object):
 
 		# queryInputs has previous context concatenated and also time dimension is dynamic during inference
 		d                  = tf.einsum('kl,itl->itk', W, query) + queryInputs[:,:qshape[1],:qshape[2]] + b
-		unscaledAttnLogits = tf.einsum('bjl,bic->bij', encOutputs, d) - alreadySelectedPenalty * alreadySelected[:, :qshape[1], :]
+
+		unscaledAttnLogits = tf.einsum('bjl,bic->bij', encOutputs, d) 
+
+		if alreadySelected is not None:
+			unscaledAttnLogits -= alreadySelectedPenalty * alreadySelected[:, :qshape[1], :]
+
 		attnLogits         = tf.nn.softmax(unscaledAttnLogits)
 		context            = tf.einsum('bij,bjc->bic', attnLogits, encOutputs)
 		return unscaledAttnLogits, attnLogits, context
@@ -77,12 +84,13 @@ class PointerNetwork(object):
 			self.embeddedTargets = tf.nn.leaky_relu(tf.einsum('kl,itl->itk', self.W_embed, self.targetInputs))
 
 
-	def CNNLayer(self, inputs, filters, dilation, name, residual=False, kernelSize=2, layertype='gau', causal=False):
+	def CNNLayer(self, inputs, filters, dilation, name, residual=False, kernelSize=2, causal=False):
 		'''
 		Generates a CNN layer
 		'''
 		gateName = 'gate_'+str(name)
 		filtName = 'filter_'+str(name)
+
 		if not causal:
 			padding = 'SAME'
 		else:
@@ -100,35 +108,26 @@ class PointerNetwork(object):
 									   rate     = self.dropoutRate,
 									   training = self.train)
 
-		if layertype == 'gau':
-		    gate = tf.layers.conv1d(inputs        = inputs,
-		                            filters       = filters,
-		                            kernel_size   = kernelSize,
-		                            dilation_rate = dilation,
-		                            padding       = padding,
-		                            activation    = tf.sigmoid,
-		                            trainable     = True,
-                                    name          = gateName)
+		# gated activation unit
+		gate = tf.layers.conv1d(inputs        = inputs,
+		                        filters       = filters,
+		                        kernel_size   = kernelSize,
+		                        dilation_rate = dilation,
+		                        padding       = padding,
+		                        activation    = tf.sigmoid,
+		                        trainable     = True,
+		                        name          = gateName)
 
-		    filt = tf.layers.conv1d(inputs        = inputs,
-		                            filters       = filters,
-		                            kernel_size   = kernelSize,
-		                            dilation_rate = dilation,
-		                            padding       = padding,
-		                            activation    = tf.tanh,
-		                            trainable     = True,
-                                    name          = filtName)
-		    out = gate * filt
+		filt = tf.layers.conv1d(inputs        = inputs,
+		                        filters       = filters,
+		                        kernel_size   = kernelSize,
+		                        dilation_rate = dilation,
+		                        padding       = padding,
+		                        activation    = tf.tanh,
+		                        trainable     = True,
+		                        name          = filtName)
+		out = gate * filt
 
-		elif layertype == 'relu':
-			out = tf.layers.conv1d(inputs         = inputs,
-		                            filters       = filters,
-		                            kernel_size   = kernelSize,
-		                            dilation_rate = dilation,
-		                            padding       = padding,
-		                            activation    = tf.relu,
-		                            trainable     = True)
-  
 		if residual:
 			if not causal:
 				return inputs[:, :, :out.shape[2]] + out
@@ -194,13 +193,20 @@ class PointerNetwork(object):
 																   b               = self.b_attn[layerNum, :], 
 														           encOutputs      = self.encOutputs, 
 														           query           = self.decConv[-1], 
-														           queryInputs     = self.embeddedTargets, 
+														           queryInputs     = self.embeddedTargets,
 														           alreadySelected = alreadySelected)	
 
 
 				# concatenate context vector 
 				self.decConv[-1] = tf.concat([self.decConv[-1], context], axis=2)
 
+			# apply glimpose
+			# unscaledAttnLogits, _, _ = self.CNNAttention(W             = self.W_attn[-1, :, :], 
+			# 										     b               = self.b_attn[-1, :], 
+			# 										     encOutputs      = self.encOutputs, 
+			# 										     query           = context, 
+			# 										     queryInputs     = self.embeddedTargets, 
+			# 										     alreadySelected = alreadySelected)			
 			self.loss += tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(labels=self.targets, logits=unscaledAttnLogits))
 
 			# Inference
@@ -229,10 +235,18 @@ class PointerNetwork(object):
 															   b               = self.b_attn[layerNum, :], 
 														       encOutputs      = self.encOutputs, 
 														       query           = query, 
-														       queryInputs     = queryInp, 
-														       alreadySelected = alreadySelected)	
+														       queryInputs     = queryInp,
+														       alreadySelected = alreadySelected)
 
 					queryInp = tf.concat([query, context], axis=2)
+
+				# applying glimpse
+				# _, attnLogits, _ = self.CNNAttention(W               = self.W_attn[-1, :, :], 
+				# 								     b               = self.b_attn[-1, :], 
+				# 							         encOutputs      = self.encOutputs, 
+				# 							         query           = context, 
+				# 							         queryInputs     = queryInp, 
+				# 							         alreadySelected = alreadySelected)	
 
 				# the next output is just from the newest time from last layer
 				self.decoderOutputs.append(tf.argmax(attnLogits[:,-1,:], axis=1))
@@ -258,16 +272,28 @@ class PointerNetwork(object):
 			if 'kernel' in v.name:
 				self.loss += self.l2Reg * tf.nn.l2_loss(v)
 
-		global_step           = tf.Variable(0, trainable=False)
 		starter_learning_rate = 1e-2
-		learning_rate         = tf.train.exponential_decay(starter_learning_rate, global_step,
+		learning_rate         = tf.train.exponential_decay(starter_learning_rate, self.globalStep,
                                            500, 0.96, staircase=True)
 
 		self.optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-		self.trainOp   = self.optimizer.minimize(self.loss, global_step=global_step)
+		self.trainOp   = self.optimizer.minimize(self.loss, global_step=self.globalStep)
+
+	def printVarsStats(self):
+		'''
+		Print the names and total number of variables in graph
+		'''
+
+		numVars = 0
+		for v in tf.trainable_variables():
+			print(v.name)
+			tmp = 1
+			for dim in v.shape:
+				tmp *= dim.value
+			numVars += tmp
+		print('Number of variables: '+str(numVars))
+
 
 if __name__ == '__main__':
 	ntr = PointerNetwork('../cfg')
-
-	for v in tf.trainable_variables():
-		print(v.name)
+	ntr.printVarsStats()

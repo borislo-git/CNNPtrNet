@@ -12,9 +12,9 @@ class SortingProblem(BaseProblem):
 	def getArgs(self, batchArray, solutionArray=None):
 		return np.argsort(batchArray, axis=1)
 
-	def accuracy(self, exactSolution, solution, batchArray):
-		return len([1 for batch in range(exactSolution.shape[0]) 
-			if sum(exactSolution[batch,1:,0]==batchArray[batch,:,:].T[0][solution[batch,:]]) == solution.shape[1]])/exactSolution.shape[0]
+	def accuracy(self, solution, batchArray):
+		return len([1 for batch in range(batchArray.shape[0]) 
+			if sum(np.sort(batchArray[batch,:,:].T[0][solution[batch,:]])==batchArray[batch,:,:].T[0][solution[batch,:]]) == solution.shape[1]])/batchArray.shape[0]
 
 
 
