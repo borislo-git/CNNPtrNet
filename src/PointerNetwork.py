@@ -2,6 +2,11 @@ import tensorflow as tf
 import configparser
 
 class PointerNetwork(object):
+	'''
+	Pointer Network
+
+	RNN parts are based on class project implementation
+	'''
 
 	def __init__(self, configFile):
 
@@ -11,9 +16,23 @@ class PointerNetwork(object):
 
 		with tf.variable_scope('Pointer_Network'):
 			self.makePlaceholders()
+
 			self.makeEmbeddings()
-			self.makeEncoder()
-			self.makeDecoder()
+
+			if self.encType == 'cnn':
+				self.makeCNNEncoder()
+			elif self.encType == 'rnn':
+				self.makeRNNEncoder()
+			else:
+				raise ValueError('Encoder type must be cnn or rnn')
+
+			if self.decType == 'cnn':
+				self.makeCNNDecoder()
+			elif self.decType == 'rnn':
+				self.makeRNNDecoder()
+			else:
+				raise ValueError('Decoder type must be cnn or rnn')
+
 			self.makeOptimizer()
 
 	def readConfig(self, configFile):
@@ -32,32 +51,40 @@ class PointerNetwork(object):
 		self.encKernelSize       = self.cparser.getint('ENCODER', 'KERNEL_SIZE')
 		self.encNumDilationLayer = self.cparser.getint('ENCODER', 'NUM_DILATION_LAYERS')
 		self.hiddenSize          = self.cparser.getint('ENCODER', 'HIDDEN_SIZE')
+		self.encType             = self.cparser.get('ENCODER', 'TYPE')
 
 		self.decKernelSize       = self.cparser.getint('DECODER', 'KERNEL_SIZE')
 		self.decNumDilationLayer = self.cparser.getint('DECODER', 'NUM_DILATION_LAYERS')		
+		self.decType             = self.cparser.get('DECODER', 'TYPE')
 
 		self.l2Reg       = self.cparser.getfloat('TRAIN', 'L2_REG')
 		self.dropoutRate = self.cparser.getfloat('TRAIN', 'DROPOUT_RATE')
 
+	def RNNAttention(self, W_ref, W_q, v, encOutputs, query, alreadySelected=None, alreadySelectedPenalty=1e6):
+		with tf.variable_scope("RNN_Attention"):
+			u_i0s = tf.einsum('kl,itl->itk', W_ref, encOutputs)
+			u_i1s = tf.expand_dims(tf.einsum('kl,il->ik', W_q, query), 1)
+			unscaledAttnLogits = tf.einsum('k,itk->it', v, tf.tanh(u_i0s + u_i1s)) - alreadySelectedPenalty * alreadySelected
+			return unscaledAttnLogits, tf.nn.softmax(unscaledAttnLogits)
 
 	def CNNAttention(self, W, b, encOutputs, query, queryInputs, alreadySelected=None, alreadySelectedPenalty=1e6):
 		'''
 		Attention mechanism following "Convolutional Sequence to Sequence Learning" Gehring (2017)
-
 		'''
-		qshape = query.shape
+		with tf.variable_scope("CNN_Attention"):
+			qshape = query.shape
 
-		# queryInputs has previous context concatenated and also time dimension is dynamic during inference
-		d                  = tf.einsum('kl,itl->itk', W, query) + queryInputs[:,:qshape[1],:qshape[2]] + b
+			# queryInputs has previous context concatenated and also time dimension is dynamic during inference
+			d                  = tf.einsum('kl,itl->itk', W, query) + queryInputs[:,:qshape[1],:qshape[2]] + b
 
-		unscaledAttnLogits = tf.einsum('bjl,bic->bij', encOutputs, d) 
+			unscaledAttnLogits = tf.einsum('bjl,bic->bij', encOutputs, d) 
 
-		if alreadySelected is not None:
-			unscaledAttnLogits -= alreadySelectedPenalty * alreadySelected[:, :qshape[1], :]
+			if alreadySelected is not None:
+				unscaledAttnLogits -= alreadySelectedPenalty * alreadySelected[:, :qshape[1], :]
 
-		attnLogits         = tf.nn.softmax(unscaledAttnLogits)
-		context            = tf.einsum('bij,bjc->bic', attnLogits, encOutputs)
-		return unscaledAttnLogits, attnLogits, context
+			attnLogits         = tf.nn.softmax(unscaledAttnLogits)
+			context            = tf.einsum('bij,bjc->bic', attnLogits, encOutputs)
+			return unscaledAttnLogits, attnLogits, context
 
 	def makePlaceholders(self):
 
@@ -136,9 +163,9 @@ class PointerNetwork(object):
 		else:
 			return out
 
-	def makeEncoder(self):
+	def makeCNNEncoder(self):
 		'''
-		Set up encoder
+		Set up dilated CNN encoder
 		'''
 
 		with tf.variable_scope('Encoder'):
@@ -159,9 +186,15 @@ class PointerNetwork(object):
 
 			self.encOutputs = tf.concat(self.encConv[1:], axis=2)
 
-	def makeDecoder(self):
+			# make LSTM states for RNN decoder
+			if self.decType == 'rnn':
+				encFinalState_c    = tf.reduce_mean(self.encOutputs, axis=1)
+				self.encFinalState = tf.nn.rnn_cell.LSTMStateTuple(c = encFinalState_c,
+																   h = tf.nn.tanh(encFinalState_c))
+
+	def makeCNNDecoder(self):
 		'''
-		Set up decoder
+		Set up causal dilated CNN decoder
 		'''
 
 		with tf.variable_scope('Decoder') as scope:
@@ -261,6 +294,68 @@ class PointerNetwork(object):
 
 				# next input
 				self.inferenceInput = tf.concat([self.inferenceInput, newInput], axis=1)
+
+	def makeRNNEncoder(self):
+		'''
+		Set up LSTM Encoder
+		'''
+
+		with tf.variable_scope('Encoder'):
+			encRNNCell = tf.nn.rnn_cell.LSTMCell(self.hiddenSize)
+			self.encOutputs, self.encFinalState = tf.nn.dynamic_rnn(cell   = encRNNCell,
+																	inputs = self.embeddedInputs,
+																	dtype  = tf.float32)
+
+	def makeRNNDecoder(self):
+		'''
+		Set up LSTM Decoder
+		'''
+
+		with tf.variable_scope('Decoder'):
+			decRNNCell = tf.nn.rnn_cell.LSTMCell(self.hiddenSize)
+
+			# Define attention weights
+			with tf.variable_scope("attention_weights"):
+				W_ref = tf.Variable(tf.random_normal([self.embeddingSize, self.embeddingSize], stddev=self.stddev),
+						name='W_ref')
+				W_q = tf.Variable(tf.random_normal([self.embeddingSize, self.embeddingSize], stddev=self.stddev),
+						name='W_q')
+				v = tf.Variable(tf.random_normal([self.embeddingSize], stddev=self.stddev),
+						name='v')
+
+			# Training
+			decoderInput = tf.tile(tf.Variable(tf.random_normal([1, self.embeddingSize])), [self.batchSize, 1])
+			decoderState = self.encFinalState
+
+			alreadySelected = tf.zeros(shape=[self.batchSize, self.maxTimeSteps], dtype=tf.float32)
+			decoderInputs = [decoderInput]
+			for t in range(self.maxTimeSteps):
+				decOutput, decoderState = decRNNCell(inputs=decoderInput,
+				      								 state=decoderState)
+
+				unscaledAttnLogits, _ = self.RNNAttention(W_ref, W_q, v, self.encOutputs, decOutput, alreadySelected=alreadySelected)
+
+				self.loss += tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(labels=self.targets[:, t, :], logits=unscaledAttnLogits))
+				
+				# feed in exact solution as input
+				decoderInput = tf.einsum('itk,it->ik', self.embeddedInputs, self.targets[:, t, :])
+				decoderInputs.append(decoderInput)
+				alreadySelected += self.targets[:, t, :]
+
+			# Inference
+			decoderInput   = tf.tile(tf.Variable(tf.random_normal([1, self.embeddingSize])), [self.batchSize, 1])
+			decoderState   = self.encFinalState
+			self.decoderOutputs = []
+			alreadySelected = tf.zeros(shape=[self.batchSize, self.maxTimeSteps], dtype=tf.float32)
+			for _ in range(self.maxTimeSteps):
+				decOutput, decoderState = decRNNCell(inputs=decoderInput,
+				      								 state=decoderState)
+				_, attnLogits = self.RNNAttention(W_ref, W_q, v, self.encOutputs, decOutput, alreadySelected=alreadySelected)
+				self.decoderOutputs.append(tf.argmax(attnLogits, axis=1))
+
+				# feed in output as next input
+				decoderInput = tf.einsum('itk,it->ik', self.embeddedInputs, tf.one_hot(self.decoderOutputs[-1], depth=self.maxTimeSteps))
+				alreadySelected += tf.one_hot(self.decoderOutputs[-1], depth=self.maxTimeSteps)
 
 	def makeOptimizer(self):
 		'''
