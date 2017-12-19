@@ -9,11 +9,18 @@ class PointerNetwork(object):
 	'''
 
 	def __init__(self, configFile):
+		'''
+		Read in paramters from the config file
+		'''
 
 		self.loss       = 0
 		self.globalStep = tf.Variable(0, trainable=False)
 		self.readConfig(configFile)
 
+	def makeGraph(self):
+		'''
+		makes the graph
+		'''
 		with tf.variable_scope('Pointer_Network'):
 			self.makePlaceholders()
 
@@ -34,7 +41,6 @@ class PointerNetwork(object):
 				raise ValueError('Decoder type must be cnn or rnn')
 
 			self.makeOptimizer()
-
 	def readConfig(self, configFile):
 		'''
 		Use config parser to get model parameters
@@ -226,7 +232,7 @@ class PointerNetwork(object):
 																   b               = self.b_attn[layerNum, :], 
 														           encOutputs      = self.encOutputs, 
 														           query           = self.decConv[-1], 
-														           queryInputs     = self.embeddedTargets,
+														           queryInputs     = self.decConv[-2],
 														           alreadySelected = alreadySelected)	
 
 
@@ -391,4 +397,5 @@ class PointerNetwork(object):
 
 if __name__ == '__main__':
 	ntr = PointerNetwork('../cfg')
+	ntr.makeGraph()
 	ntr.printVarsStats()
