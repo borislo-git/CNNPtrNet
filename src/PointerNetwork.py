@@ -6,6 +6,8 @@ class PointerNetwork(object):
 	Pointer Network
 
 	RNN parts are based on class project implementation
+
+	The output of this network are the a list of indicies corresponding to an element in the input
 	'''
 
 	def __init__(self, configFile):
@@ -41,6 +43,7 @@ class PointerNetwork(object):
 				raise ValueError('Decoder type must be cnn or rnn')
 
 			self.makeOptimizer()
+
 	def readConfig(self, configFile):
 		'''
 		Use config parser to get model parameters
@@ -62,16 +65,27 @@ class PointerNetwork(object):
 		self.decKernelSize       = self.cparser.getint('DECODER', 'KERNEL_SIZE')
 		self.decNumDilationLayer = self.cparser.getint('DECODER', 'NUM_DILATION_LAYERS')		
 		self.decType             = self.cparser.get('DECODER', 'TYPE')
+		self.glimpse             = self.cparser.getboolean('DECODER', 'GLIMPSE')
 
 		self.l2Reg       = self.cparser.getfloat('TRAIN', 'L2_REG')
 		self.dropoutRate = self.cparser.getfloat('TRAIN', 'DROPOUT_RATE')
+		self.clipNorm    = self.cparser.getfloat('TRAIN', 'CLIP_NORM_THRESHOLD')
 
 	def RNNAttention(self, W_ref, W_q, v, encOutputs, query, alreadySelected=None, alreadySelectedPenalty=1e6):
+		'''
+		Attention mechanism in Vinyals (2015)
+		'''
 		with tf.variable_scope("RNN_Attention"):
-			u_i0s = tf.einsum('kl,itl->itk', W_ref, encOutputs)
-			u_i1s = tf.expand_dims(tf.einsum('kl,il->ik', W_q, query), 1)
-			unscaledAttnLogits = tf.einsum('k,itk->it', v, tf.tanh(u_i0s + u_i1s)) - alreadySelectedPenalty * alreadySelected
-			return unscaledAttnLogits, tf.nn.softmax(unscaledAttnLogits)
+			u_i0s              = tf.einsum('kl,itl->itk', W_ref, encOutputs)
+			u_i1s              = tf.expand_dims(tf.einsum('kl,il->ik', W_q, query), 1)
+			unscaledAttnLogits = tf.einsum('k,itk->it', v, tf.tanh(u_i0s + u_i1s))
+
+			if alreadySelected is not None:
+				unscaledAttnLogits -= alreadySelectedPenalty * alreadySelected
+
+			attnLogits         = tf.nn.softmax(unscaledAttnLogits)
+			context            = tf.einsum('bi,bic->bc', attnLogits, encOutputs)
+			return unscaledAttnLogits, attnLogits, context
 
 	def CNNAttention(self, W, b, encOutputs, query, queryInputs, alreadySelected=None, alreadySelectedPenalty=1e6):
 		'''
@@ -161,6 +175,7 @@ class PointerNetwork(object):
 		                        name          = filtName)
 		out = gate * filt
 
+		# residual does not add the input context vector which is concatenated after the original outputs of previous layer
 		if residual:
 			if not causal:
 				return inputs[:, :, :out.shape[2]] + out
@@ -180,7 +195,7 @@ class PointerNetwork(object):
 			self.encConv = [self.embeddedInputs]
 
 			# make the other layers
-			factors = [1, 2, 4, 8, 16, 32, 64]
+			factors = [1, 2, 4, 8, 16, 32, 1, 2]
 			for layerNum in range(0, self.encNumDilationLayer):
 				useRes = (layerNum!=0)
 				self.encConv.append(self.CNNLayer(self.encConv[-1], 
@@ -237,15 +252,18 @@ class PointerNetwork(object):
 
 
 				# concatenate context vector 
-				self.decConv[-1] = tf.concat([self.decConv[-1], context], axis=2)
+				# self.decConv[-1] = tf.concat([self.decConv[-1], context], axis=2)
+				self.decConv[-1] += context
 
-			# apply glimpose
-			# unscaledAttnLogits, _, _ = self.CNNAttention(W             = self.W_attn[-1, :, :], 
-			# 										     b               = self.b_attn[-1, :], 
-			# 										     encOutputs      = self.encOutputs, 
-			# 										     query           = context, 
-			# 										     queryInputs     = self.embeddedTargets, 
-			# 										     alreadySelected = alreadySelected)			
+			# glimpse
+			if self.glimpse:
+				unscaledAttnLogits, _, _ = self.CNNAttention(W             = self.W_attn[-1, :, :], 
+														     b               = self.b_attn[-1, :], 
+														     encOutputs      = self.encOutputs, 
+														     query           = context, 
+														     queryInputs     = self.embeddedTargets, 
+														     alreadySelected = alreadySelected)		
+
 			self.loss += tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(labels=self.targets, logits=unscaledAttnLogits))
 
 			# Inference
@@ -260,9 +278,9 @@ class PointerNetwork(object):
 			for time in range(self.maxTimeSteps):
 
 				# stacked CNN
-				queryInp = self.inferenceInput
+				queryInp = [self.inferenceInput]
 				for layerNum in range(0, self.decNumDilationLayer):
-					query = self.CNNLayer(queryInp, 
+					query = self.CNNLayer(queryInp[-1], 
 										  filters    = numFilters, 
 										  kernelSize = self.decKernelSize,
 										  dilation   = factors[layerNum], 
@@ -274,18 +292,20 @@ class PointerNetwork(object):
 															   b               = self.b_attn[layerNum, :], 
 														       encOutputs      = self.encOutputs, 
 														       query           = query, 
-														       queryInputs     = queryInp,
+														       queryInputs     = queryInp[-1],
 														       alreadySelected = alreadySelected)
 
-					queryInp = tf.concat([query, context], axis=2)
+					# queryInp = tf.concat([query, context], axis=2)
+					queryInp.append(query + context)
 
-				# applying glimpse
-				# _, attnLogits, _ = self.CNNAttention(W               = self.W_attn[-1, :, :], 
-				# 								     b               = self.b_attn[-1, :], 
-				# 							         encOutputs      = self.encOutputs, 
-				# 							         query           = context, 
-				# 							         queryInputs     = queryInp, 
-				# 							         alreadySelected = alreadySelected)	
+				# glimpse
+				if self.glimpse:
+					_, attnLogits, _ = self.CNNAttention(W               = self.W_attn[-1, :, :], 
+													     b               = self.b_attn[-1, :], 
+												         encOutputs      = self.encOutputs, 
+												         query           = context, 
+												         queryInputs     = queryInp[-2], 
+												         alreadySelected = alreadySelected)	
 
 				# the next output is just from the newest time from last layer
 				self.decoderOutputs.append(tf.argmax(attnLogits[:,-1,:], axis=1))
@@ -317,11 +337,12 @@ class PointerNetwork(object):
 		Set up LSTM Decoder
 		'''
 
-		with tf.variable_scope('Decoder'):
+		with tf.variable_scope('Decoder') as scope:
 			decRNNCell = tf.nn.rnn_cell.LSTMCell(self.hiddenSize)
+			# decRNNCell = tf.contrib.rnn.ResidualWrapper(decRNNCell)
 
 			# Define attention weights
-			with tf.variable_scope("attention_weights"):
+			with tf.variable_scope("Attention_Weights"):
 				W_ref = tf.Variable(tf.random_normal([self.embeddingSize, self.embeddingSize], stddev=self.stddev),
 						name='W_ref')
 				W_q = tf.Variable(tf.random_normal([self.embeddingSize, self.embeddingSize], stddev=self.stddev),
@@ -339,7 +360,10 @@ class PointerNetwork(object):
 				decOutput, decoderState = decRNNCell(inputs=decoderInput,
 				      								 state=decoderState)
 
-				unscaledAttnLogits, _ = self.RNNAttention(W_ref, W_q, v, self.encOutputs, decOutput, alreadySelected=alreadySelected)
+				unscaledAttnLogits, _, context = self.RNNAttention(W_ref, W_q, v, self.encOutputs, decOutput, alreadySelected=alreadySelected)
+				# glimpse
+				if self.glimpse:
+					unscaledAttnLogits, _, _ = self.RNNAttention(W_ref, W_q, v, self.encOutputs, context, alreadySelected=alreadySelected)
 
 				self.loss += tf.reduce_sum(tf.nn.softmax_cross_entropy_with_logits(labels=self.targets[:, t, :], logits=unscaledAttnLogits))
 				
@@ -349,6 +373,7 @@ class PointerNetwork(object):
 				alreadySelected += self.targets[:, t, :]
 
 			# Inference
+			scope.reuse_variables()
 			decoderInput   = tf.tile(tf.Variable(tf.random_normal([1, self.embeddingSize])), [self.batchSize, 1])
 			decoderState   = self.encFinalState
 			self.decoderOutputs = []
@@ -356,11 +381,16 @@ class PointerNetwork(object):
 			for _ in range(self.maxTimeSteps):
 				decOutput, decoderState = decRNNCell(inputs=decoderInput,
 				      								 state=decoderState)
-				_, attnLogits = self.RNNAttention(W_ref, W_q, v, self.encOutputs, decOutput, alreadySelected=alreadySelected)
+
+				_, attnLogits, context = self.RNNAttention(W_ref, W_q, v, self.encOutputs, decOutput, alreadySelected=alreadySelected)
+				# glimpse
+				if self.glimpse:
+					_, attnLogits, _ = self.RNNAttention(W_ref, W_q, v, self.encOutputs, context, alreadySelected=alreadySelected)
+
 				self.decoderOutputs.append(tf.argmax(attnLogits, axis=1))
 
 				# feed in output as next input
-				decoderInput = tf.einsum('itk,it->ik', self.embeddedInputs, tf.one_hot(self.decoderOutputs[-1], depth=self.maxTimeSteps))
+				decoderInput     = tf.einsum('itk,it->ik', self.embeddedInputs, tf.one_hot(self.decoderOutputs[-1], depth=self.maxTimeSteps))
 				alreadySelected += tf.one_hot(self.decoderOutputs[-1], depth=self.maxTimeSteps)
 
 	def makeOptimizer(self):
@@ -376,10 +406,14 @@ class PointerNetwork(object):
 		starter_learning_rate = 1e-2
 		learning_rate         = tf.train.exponential_decay(starter_learning_rate, self.globalStep,
                                            500, 0.96, staircase=True)
-
 		self.optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
-		self.trainOp   = self.optimizer.minimize(self.loss, global_step=self.globalStep)
 
+		# gradient norm clipping
+		# gradients, variables = zip(*self.optimizer.compute_gradients(self.loss))
+		# gradients, _ = tf.clip_by_global_norm(gradients, self.clipNorm)
+		# self.trainOp  = self.optimizer.apply_gradients(zip(gradients, variables), global_step=self.globalStep)
+
+		self.trainOp = self.optimizer.minimize(self.loss, global_step=self.globalStep)
 	def printVarsStats(self):
 		'''
 		Print the names and total number of variables in graph

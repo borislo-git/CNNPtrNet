@@ -14,12 +14,14 @@ class BaseProblem(object):
 	def getSolution(self, batchArray):
 		raise NotImplementedError
 
+	def accuracy(self, solution, batchArray):
+		raise NotImplementedError
+
 	def makeTargets(self, batchArray):
 		# return decoder training inputs and one hot targets
 
-		# prepend -1 as the start token 
 		solution    = self.getSolution(batchArray)
-		argArray    = self.getArgs(batchArray)
+		argArray    = self.getArgs(batchArray=batchArray, solutionArray=solution)
 		high        = np.max(argArray) + 1
 		oneHots     = np.eye(high)[np.squeeze(argArray, axis=2)]
-		return np.insert(solution, obj=0, values=-1, axis=1), oneHots
+		return solution, oneHots
