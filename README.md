@@ -9,7 +9,3 @@ Stack the encoder with dilated CNNs with residual. For the encoder, concatenate 
 ## Some Results
 * CNN-Encoder with LSTM-Decoder performs the best
 
-## Intesting Extensions
-* Knapsack Problem
-* Incorporate RL
-* Better loss function for set outputs
