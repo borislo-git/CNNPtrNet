@@ -8,6 +8,6 @@ Stack the encoder with dilated CNNs with residual. For the encoder, concatenate 
 
 ## Some Results
 Tests: train on sets of 5 and evaluate on sets of 15
-* CNN-Encoder with LSTM-Decoder performs the best for sorting
-* LSTM-Encoder with LSTM-Decoder performs the best for TSP
+* CNN-LSTM performs the best for sorting
+* LSTM-LSTM (with 300k parameters) and CNN-LSTM (with 200k parameters) performs roughly the same for TSP
 
