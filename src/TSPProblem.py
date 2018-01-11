@@ -34,12 +34,12 @@ class TSPProblem(BaseProblem):
 		output = []
 
 		# brute force for small problems
-		if batchArray.shape[1] < 8:
+		if batchArray.shape[1] < 6:
 			for setNum in range(batchArray.shape[0]):
 				thisSet = batchArray[setNum, :, :].tolist()
-				output.append(min([perm for perm in permutations(thisSet) if perm[0] == thisSet[0]], key=self.pathLength))
+				output.append(min([perm for perm in permutations(thisSet) if perm[0]==thisSet[0]], key=self.pathLength))
 
-		# nearest neighbors for everything else
+		# nearest neighbors where the starting city is the first in the list for everything else
 		else:
 			for setNum in range(batchArray.shape[0]):
 				thisSet = batchArray[setNum, :, :].tolist()
